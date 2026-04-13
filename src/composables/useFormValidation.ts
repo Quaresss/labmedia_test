@@ -1,22 +1,21 @@
-import { computed, reactive, toRaw, unref, watch, type ComputedRef, type Ref } from 'vue'
+import {
+  computed,
+  reactive,
+  toRaw,
+  toValue,
+  watch,
+  type ComputedRef,
+  type MaybeRefOrGetter,
+} from 'vue'
 
-/**
- * Результат одного правила: `true` — ок, строка — текст ошибки.
- */
 export type RuleOutcome = true | string
 
-/**
- * Произвольный синхронный валидатор для поля `K` модели `TValues`.
- */
-export type CustomValidatorFn<TValues extends Record<string, unknown>, K extends keyof TValues> = (
+export type CustomValidatorFn<TValues extends object, K extends keyof TValues> = (
   value: TValues[K],
   ctx: { values: TValues; field: K },
 ) => RuleOutcome
 
-/**
- * Встроенные правила (типовые). Сообщение `message` переопределяет текст по умолчанию.
- */
-export type BuiltInFieldRule<TValues extends Record<string, unknown>, K extends keyof TValues> =
+export type BuiltInFieldRule<TValues extends object, K extends keyof TValues> =
   | { type: 'required'; message?: string }
   | { type: 'minLength'; min: number; message?: string }
   | { type: 'maxLength'; max: number; message?: string }
@@ -24,102 +23,69 @@ export type BuiltInFieldRule<TValues extends Record<string, unknown>, K extends 
   | { type: 'pattern'; regex: RegExp; message?: string }
   | { type: 'custom'; validate: CustomValidatorFn<TValues, K> }
 
-/**
- * Описание набора правил для одного поля.
- */
-export type FieldRules<TValues extends Record<string, unknown>, K extends keyof TValues> =
-  BuiltInFieldRule<TValues, K>[]
+export type FieldRules<TValues extends object, K extends keyof TValues> = BuiltInFieldRule<TValues, K>[]
 
-/**
- * Схема формы: ключи — имена полей модели, значения — списки правил.
- * Поля модели без записи в схеме не валидируются.
- */
-export type FormValidationSchema<TValues extends Record<string, unknown>> = {
+export type FormValidationSchema<TValues extends object> = {
   [K in keyof TValues]?: FieldRules<TValues, K>
 }
 
-/**
- * Состояние валидации одного поля.
- */
 export interface FieldValidationState {
-  /** Сообщения ошибок (после последнего запуска правил для этого поля). */
   errors: string[]
-  /** Поле получало фокус / явную валидацию — см. `touchField`, `validate`, `validateField`. */
   touched: boolean
-  /** Значение отличалось от снимка на момент создания composable. */
   dirty: boolean
-  /** Для этого поля хотя бы раз выполняли валидацию. */
   validated: boolean
 }
 
-export interface UseFormValidationOptions<TValues extends Record<string, unknown>> {
-  /** Реактивная модель значений (обычно `reactive` или `ref` с объектом). */
-  model: Ref<TValues> | TValues
-  /** Правила по полям. */
+export interface UseFormValidationOptions<TValues extends object> {
+  model: MaybeRefOrGetter<TValues>
   schema: FormValidationSchema<TValues>
 }
 
-export interface UseFormValidationReturn<TValues extends Record<string, unknown>> {
-  /** Состояние по каждому полю из схемы. */
+export interface UseFormValidationReturn<TValues extends object> {
   fieldState: { [K in keyof TValues]?: FieldValidationState }
-  /** Все поля из схемы прошли валидацию и без ошибок. */
   isValid: ComputedRef<boolean>
-  /** Есть хотя бы одна ошибка среди полей схемы после их валидации. */
   hasError: ComputedRef<boolean>
-  /** Запуск правил для всех полей схемы. */
   validate: () => boolean
-  /** Запуск правил для одного поля (должно быть в схеме). */
   validateField: <K extends keyof TValues & string>(field: K) => boolean
-  /** Сброс ошибок и флагов `touched` / `validated`; `dirty` пересчитывается от начального снимка. */
   reset: (options?: { remeasureInitial?: boolean }) => void
-  /** Пометить поле как `touched` без валидации. */
   touchField: <K extends keyof TValues & string>(field: K) => void
 }
 
-function getModelObject<TValues extends Record<string, unknown>>(model: Ref<TValues> | TValues): TValues {
-  return unref(model) as TValues
+const DEFAULT_MESSAGES = {
+  required: 'Обязательное поле',
+  minLength: (min: number) => `Минимум ${min} символов`,
+  maxLength: (max: number) => `Максимум ${max} символов`,
+  email: 'Некорректный email',
+  pattern: 'Значение не подходит под шаблон',
+} as const
+
+const SIMPLE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+function asTrimmedString(value: unknown): string {
+  return value == null ? '' : String(value)
 }
 
-function cloneSnapshot<T extends Record<string, unknown>>(v: T): T {
-  return structuredClone(toRaw(v) as T) as T
-}
-
-function defaultMessages() {
-  return {
-    required: 'Обязательное поле',
-    minLength: (min: number) => `Минимум ${min} символов`,
-    maxLength: (max: number) => `Максимум ${max} символов`,
-    email: 'Некорректный email',
-    pattern: 'Значение не подходит под шаблон',
-  } as const
-}
-
-function runBuiltInRule<TValues extends Record<string, unknown>, K extends keyof TValues>(
+function evaluateBuiltInRule<TValues extends object, K extends keyof TValues>(
   rule: BuiltInFieldRule<TValues, K>,
   value: TValues[K],
   ctx: { values: TValues; field: K },
 ): RuleOutcome {
-  const msg = defaultMessages()
-  const str = value == null ? '' : String(value)
+  const str = asTrimmedString(value)
 
   switch (rule.type) {
     case 'required':
-      if (str.trim() === '') return rule.message ?? msg.required
-      return true
+      return str.trim() === '' ? rule.message ?? DEFAULT_MESSAGES.required : true
     case 'minLength':
-      if (str.length < rule.min) return rule.message ?? msg.minLength(rule.min)
-      return true
+      return str.length < rule.min ? rule.message ?? DEFAULT_MESSAGES.minLength(rule.min) : true
     case 'maxLength':
-      if (str.length > rule.max) return rule.message ?? msg.maxLength(rule.max)
-      return true
+      return str.length > rule.max ? rule.message ?? DEFAULT_MESSAGES.maxLength(rule.max) : true
     case 'email': {
       if (str.trim() === '') return true
-      const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str)
-      return ok ? true : rule.message ?? msg.email
+      return SIMPLE_EMAIL_RE.test(str) ? true : rule.message ?? DEFAULT_MESSAGES.email
     }
     case 'pattern':
       if (str === '') return true
-      return rule.regex.test(str) ? true : rule.message ?? msg.pattern
+      return rule.regex.test(str) ? true : rule.message ?? DEFAULT_MESSAGES.pattern
     case 'custom':
       return rule.validate(value, ctx)
     default: {
@@ -129,113 +95,116 @@ function runBuiltInRule<TValues extends Record<string, unknown>, K extends keyof
   }
 }
 
-/**
- * Composable валидации формы: схема правил + реактивная модель.
- *
- * **Семантика `isValid`:** `true`, только если для каждого поля из `schema` вызывалась
- * валидация (`validate` / `validateField`) и список `errors` пуст.
- */
-export function useFormValidation<TValues extends Record<string, unknown>>(
+function collectFieldErrors<TValues extends object, K extends keyof TValues & string>(
+  schema: FormValidationSchema<TValues>,
+  field: K,
+  values: TValues,
+): string[] {
+  const rules = schema[field]
+  if (!rules?.length) return []
+
+  const value = values[field]
+  const errors: string[] = []
+  for (const rule of rules) {
+    const outcome = evaluateBuiltInRule(rule as BuiltInFieldRule<TValues, K>, value, { values, field })
+    if (outcome !== true) {
+      errors.push(outcome)
+      break
+    }
+  }
+  return errors
+}
+
+function cloneFormSnapshot<T extends object>(model: T): T {
+  return structuredClone(toRaw(model) as T) as T
+}
+
+function isSameSnapshotValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (a !== null && b !== null && typeof a === 'object' && typeof b === 'object') {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b)
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+export function useFormValidation<TValues extends object>(
   options: UseFormValidationOptions<TValues>,
 ): UseFormValidationReturn<TValues> {
   const { model, schema } = options
-
   const schemaKeys = Object.keys(schema) as (keyof TValues & string)[]
 
-  function captureSnapshot(m: Ref<TValues> | TValues): TValues {
-    return cloneSnapshot(getModelObject(m))
-  }
+  const readModel = (): TValues => toValue(model)
 
-  let initialSnapshot = captureSnapshot(model)
+  const captureSnapshot = (): TValues => cloneFormSnapshot(readModel())
+  let baseline = captureSnapshot()
 
   const fieldState = reactive({}) as { [K in keyof TValues]?: FieldValidationState }
-
   for (const key of schemaKeys) {
-    fieldState[key] = {
-      errors: [],
-      touched: false,
-      dirty: false,
-      validated: false,
-    }
+    fieldState[key] = { errors: [], touched: false, dirty: false, validated: false }
   }
 
-  function recomputeDirty() {
-    const current = getModelObject(model)
+  const syncDirtyFlags = () => {
+    const current = readModel()
     for (const key of schemaKeys) {
       const st = fieldState[key]
       if (!st) continue
-      st.dirty = !valuesEqual((initialSnapshot as TValues)[key], current[key])
+      st.dirty = !isSameSnapshotValue(baseline[key], current[key])
     }
   }
 
-  watch(
-    () => getModelObject(model),
-    () => recomputeDirty(),
-    { deep: true },
-  )
-
-  recomputeDirty()
-
-  function collectErrorsForField<K extends keyof TValues & string>(field: K): string[] {
-    const rules = schema[field]
-    if (!rules?.length) return []
-
-    const values = getModelObject(model)
-    const value = values[field]
-    const errors: string[] = []
-
-    for (const rule of rules) {
-      const result = runBuiltInRule(rule as BuiltInFieldRule<TValues, K>, value, { values, field })
-      if (result !== true) errors.push(result)
+  const syncValidatedErrorsWithModel = () => {
+    const values = readModel()
+    syncDirtyFlags()
+    for (const key of schemaKeys) {
+      const st = fieldState[key]
+      if (st?.validated) {
+        st.errors = collectFieldErrors(schema, key, values)
+      }
     }
-    return errors
   }
+
+  watch(() => readModel(), syncValidatedErrorsWithModel, { deep: true })
+  syncValidatedErrorsWithModel()
 
   const isValid = computed(() => {
     if (schemaKeys.length === 0) return true
-    for (const key of schemaKeys) {
-      const st = fieldState[key]
-      if (!st?.validated || st.errors.length > 0) return false
-    }
-    return true
+    const values = readModel()
+    return schemaKeys.every((key) => collectFieldErrors(schema, key, values).length === 0)
   })
 
-  const hasError = computed(() => {
-    for (const key of schemaKeys) {
-      const st = fieldState[key]
-      if (st?.validated && st.errors.length > 0) return true
-    }
-    return false
-  })
+  const hasError = computed(() =>
+    schemaKeys.some((key) => (fieldState[key]?.errors.length ?? 0) > 0),
+  )
 
-  function validateField<K extends keyof TValues & string>(field: K): boolean {
+  const validateField = <K extends keyof TValues & string>(field: K): boolean => {
     const st = fieldState[field]
     if (!st) return true
 
-    st.errors = collectErrorsForField(field)
+    st.errors = collectFieldErrors(schema, field, readModel())
     st.touched = true
     st.validated = true
     return st.errors.length === 0
   }
 
-  function validate(): boolean {
+  const validate = (): boolean => {
     let ok = true
     for (const key of schemaKeys) {
-      const fieldOk = validateField(key)
-      if (!fieldOk) ok = false
+      if (!validateField(key)) ok = false
     }
     return ok
   }
 
-  function touchField<K extends keyof TValues & string>(field: K) {
+  const touchField = <K extends keyof TValues & string>(field: K) => {
     const st = fieldState[field]
     if (st) st.touched = true
   }
 
-  function reset(resetOptions?: { remeasureInitial?: boolean }) {
-    if (resetOptions?.remeasureInitial) {
-      initialSnapshot = captureSnapshot(model)
-    }
+  const reset = (resetOptions?: { remeasureInitial?: boolean }) => {
+    if (resetOptions?.remeasureInitial) baseline = captureSnapshot()
     for (const key of schemaKeys) {
       const st = fieldState[key]
       if (!st) continue
@@ -243,7 +212,7 @@ export function useFormValidation<TValues extends Record<string, unknown>>(
       st.touched = false
       st.validated = false
     }
-    recomputeDirty()
+    syncDirtyFlags()
   }
 
   return {
@@ -255,16 +224,4 @@ export function useFormValidation<TValues extends Record<string, unknown>>(
     reset,
     touchField,
   }
-}
-
-function valuesEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) return true
-  if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
-    try {
-      return JSON.stringify(a) === JSON.stringify(b)
-    } catch {
-      return false
-    }
-  }
-  return false
 }
